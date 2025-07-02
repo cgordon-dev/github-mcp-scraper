@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: false
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest black flake8 mypy isort
+
+    - name: Lint with flake8
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        flake8 mcp_scraper/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 mcp_scraper/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Check code formatting with black
+      run: |
+        black --check mcp_scraper/
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only mcp_scraper/
+
+    - name: Type check with mypy
+      run: |
+        mypy mcp_scraper/ --ignore-missing-imports
+
+    - name: Clone MCP servers repository (for testing)
+      run: |
+        git clone https://github.com/modelcontextprotocol/servers.git mcp_servers_repo
+
+    - name: Test basic functionality
+      run: |
+        python -m mcp_scraper.main --max-servers 5 --output test_ci.json
+        
+    - name: Validate output
+      run: |
+        python -c "
+        import json
+        with open('test_ci.json') as f:
+            data = json.load(f)
+            assert 'total_servers' in data
+            assert 'servers' in data
+            assert data['total_servers'] >= 1
+            print(f'✅ Successfully processed {data[\"total_servers\"]} servers')
+            tools_count = sum(len(s.get('tools', [])) for s in data['servers'])
+            print(f'✅ Extracted {tools_count} tools')
+        "
+
+  test-with-github-token:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Clone MCP servers repository
+      run: |
+        git clone https://github.com/modelcontextprotocol/servers.git mcp_servers_repo
+
+    - name: Test with GitHub token (enhanced metadata)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        python -m mcp_scraper.main --max-servers 10 --output test_with_token.json
+        
+    - name: Validate enhanced output
+      run: |
+        python -c "
+        import json
+        with open('test_with_token.json') as f:
+            data = json.load(f)
+            print(f'✅ Processed {data[\"total_servers\"]} servers with GitHub token')
+            tools_count = sum(len(s.get('tools', [])) for s in data['servers'])
+            print(f'✅ Enhanced tool extraction: {tools_count} tools')
+        "
+
+  docker-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      run: |
+        docker build -t mcp-scraper:test .
+
+    - name: Test Docker container
+      run: |
+        docker run --rm -v $(pwd):/workspace mcp-scraper:test \
+          python -m mcp_scraper.main --max-servers 3 --output /workspace/docker_test.json
+
+    - name: Validate Docker output
+      run: |
+        test -f docker_test.json
+        python -c "
+        import json
+        with open('docker_test.json') as f:
+            data = json.load(f)
+            assert data['total_servers'] >= 1
+            print('✅ Docker test passed')
+        "
+
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install safety
+      run: |
+        pip install safety
+
+    - name: Run security scan
+      run: |
+        safety check -r requirements.txt
+
+  documentation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check documentation files
+      run: |
+        test -f README.md
+        test -f CONTRIBUTING.md
+        test -f CHANGELOG.md
+        test -f LICENSE
+        test -f .gitignore
+        echo "✅ All documentation files present"
+
+    - name: Validate README links
+      run: |
+        # Check for basic structure in README
+        grep -q "MCP Registry Scraper" README.md
+        grep -q "Installation" README.md
+        grep -q "Usage" README.md
+        grep -q "Enhanced Tool Extraction" README.md
+        echo "✅ README structure validated"
